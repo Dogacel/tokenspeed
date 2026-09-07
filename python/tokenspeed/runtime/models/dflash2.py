@@ -286,6 +286,7 @@ class DFlash2DecoderLayer(DFlashDecoderLayer):
                 attention.group_id = FULL_ATTENTION
                 # Storage remains in Kimi-K3's full-attention group. This field
                 # is only the compute visibility contract for the MLA backend.
+                # TODO: mla honours it but tokenspeed_mla ignores it.
                 attention.sliding_window_size = sliding_window
             self.comm_manager = CommManager(
                 mapping=mapping,
@@ -309,13 +310,10 @@ class DFlash2DecoderLayer(DFlashDecoderLayer):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
         ctx: ForwardContext,
-        out_cache_loc: torch.Tensor,
         residual: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if ctx.forward_mode.is_idle():
-            return super().forward(
-                positions, hidden_states, ctx, out_cache_loc, residual
-            )
+            return super().forward(positions, hidden_states, ctx, residual)
 
         if residual is None:
             residual = hidden_states
@@ -334,7 +332,6 @@ class DFlash2DecoderLayer(DFlashDecoderLayer):
             positions=positions,
             hidden_states=hidden_states,
             ctx=ctx,
-            out_cache_loc=out_cache_loc,
         )
         if self.comm_manager is not None:
             attention_kwargs["comm_manager"] = self.comm_manager
@@ -386,6 +383,10 @@ class DFlash2DraftModel(DFlashDraftModel):
     @property
     def _uses_mla(self) -> bool:
         return _dflash2_uses_mla(self.config)
+
+    @property
+    def attention_kind(self) -> str:
+        return "kimi_mla" if self._uses_mla else "qwen_mha"
 
     @torch.no_grad()
     def write_context_kv(
@@ -481,6 +482,18 @@ class DFlash2DraftModel(DFlashDraftModel):
             raise ValueError(
                 f"DFlash2 MLA checkpoint is missing {len(missing)} weights: {missing[:8]}"
             )
+        self.post_load_weights()
+
+    def post_load_weights(self) -> None:
+        """Precompute the absorbed decode factors from kv_b_proj.
+
+        Under ``--load-format dummy`` load_weights never runs, so the absorbed
+        decode kernel would dereference null w_kc/w_vc. DummyModelLoader calls
+        this hook, so populate them here. GQA checkpoints have no kv_b_proj to
+        absorb.
+        """
+        if not self._uses_mla:
+            return
         for layer in self.layers:
             self_attn = layer.self_attn
             self_attn.w_kc, self_attn.w_vc = _prepare_mla_kv_b_proj_weights(

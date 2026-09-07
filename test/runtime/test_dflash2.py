@@ -43,6 +43,7 @@ from tokenspeed.runtime.layers.attention.kv_cache.recipes.spec import FULL_ATTEN
 from tokenspeed.runtime.models import dflash as dflash_model
 from tokenspeed.runtime.models.dflash2 import (
     CandidateSelector,
+    DFlash2DecoderLayer,
     DFlash2DraftModel,
     DFlashGroupedConv,
     _dflash2_mla_rope,
@@ -296,3 +297,30 @@ def test_official_nodes_capture_and_replay_in_one_cuda_graph() -> None:
     expected = torch.empty_like(static_out)
     _walk_greedy_path(static_candidates, eager_scores, static_anchor, expected)
     torch.testing.assert_close(replayed, expected)
+
+
+@pytest.mark.parametrize(
+    ("attention_mode", "expected"),
+    (("mla", "kimi_mla"), ("gqa", "qwen_mha")),
+)
+def test_dflash2_publishes_the_attention_kind_the_drafter_slices_on(
+    attention_mode: str, expected: str
+) -> None:
+    """DFLASH publishes num_extends=0 only for kimi_mla."""
+    model = DFlash2DraftModel.__new__(DFlash2DraftModel)
+    model.config = SimpleNamespace(
+        architectures=["DFlash2DraftModel"],
+        dflash_config={"attention_mode": attention_mode},
+    )
+    assert model.attention_kind == expected
+
+
+def test_post_load_weights_is_a_no_op_for_gqa_checkpoints() -> None:
+    """A GQA draft holds a DFlashAttention with no kv_b_proj to absorb."""
+    model = DFlash2DraftModel.__new__(DFlash2DraftModel)
+    model.config = SimpleNamespace(
+        architectures=["DFlash2DraftModel"],
+        dflash_config={"attention_mode": "gqa"},
+    )
+    # .layers is deliberately absent: reaching the loop would raise here.
+    model.post_load_weights()
