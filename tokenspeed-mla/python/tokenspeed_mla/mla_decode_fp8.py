@@ -2581,9 +2581,30 @@ class BlackwellMultiHeadLatentAttentionForwardFP8:
                 mma_s_producer_state,
                 wait_q=True,
             )
-            k_tile_count -= 1
+            qk_tile_count = k_tile_count - 1
+            pv_tile_count = k_tile_count
+            # 2-CTA: issue QK two tiles ahead of PV so it does not wait behind PV
+            if cutlass.const_expr(self.use_2cta_instrs):
+                if qk_tile_count > 0:
+                    (
+                        tiled_mma_qk,
+                        load_q_consumer_state,
+                        load_k_consumer_state,
+                        load_k_rope_consumer_state,
+                        mma_s_producer_state,
+                    ) = self.mma_qk(
+                        common_params,
+                        qk_params,
+                        tiled_mma_qk,
+                        load_q_consumer_state,
+                        load_k_consumer_state,
+                        load_k_rope_consumer_state,
+                        mma_s_producer_state,
+                        wait_q=False,
+                    )
+                    qk_tile_count -= 1
 
-            while k_tile_count > 0:
+            while qk_tile_count > 0:
                 (
                     tiled_mma_qk,
                     load_q_consumer_state,
@@ -2600,6 +2621,7 @@ class BlackwellMultiHeadLatentAttentionForwardFP8:
                     mma_s_producer_state,
                     wait_q=False,
                 )
+                qk_tile_count -= 1
                 (
                     tiled_mma_pv,
                     load_v_consumer_state,
@@ -2615,24 +2637,27 @@ class BlackwellMultiHeadLatentAttentionForwardFP8:
                     mma_o_producer_state,
                 )
                 pv_k_index = pv_k_index + 1
-                k_tile_count -= 1
-            # release q consumer states
+                pv_tile_count -= 1
+            # release q consumer states, then drain the remaining PV tiles
             load_q_pipeline.consumer_release(load_q_release_state)
             load_q_release_state.advance()
-            (
-                tiled_mma_pv,
-                load_v_consumer_state,
-                p_mma_consumer_state,
-                mma_o_producer_state,
-            ) = self.mma_pv(
-                common_params,
-                pv_params,
-                pv_k_index,
-                tiled_mma_pv,
-                load_v_consumer_state,
-                p_mma_consumer_state,
-                mma_o_producer_state,
-            )
+            while pv_tile_count > 0:
+                (
+                    tiled_mma_pv,
+                    load_v_consumer_state,
+                    p_mma_consumer_state,
+                    mma_o_producer_state,
+                ) = self.mma_pv(
+                    common_params,
+                    pv_params,
+                    pv_k_index,
+                    tiled_mma_pv,
+                    load_v_consumer_state,
+                    p_mma_consumer_state,
+                    mma_o_producer_state,
+                )
+                pv_k_index = pv_k_index + 1
+                pv_tile_count -= 1
 
         return (  # type: ignore[return-value]
             tiled_mma_qk,
