@@ -77,6 +77,11 @@ def _get_reducer_d_tiles(
     return best
 
 
+def _get_reducer_max_splits(split_kv: int) -> int:
+    """Smallest power of two (at least 4) covering the split count."""
+    return max(4, 1 << (split_kv - 1).bit_length())
+
+
 @functools.cache
 def _get_split_kv_and_workspace_size(
     B: int,
@@ -723,9 +728,8 @@ def tokenspeed_mla_decode(
             if is_fp8
             else 1
         ),
-        # Public FP8 auto-splitting is bounded by 64 (M64) or 32 (M128).
-        # Both values are in the compile cache key, including across batches.
-        reducer_max_splits=(64 if mma_m_tile == 64 else 32) if is_fp8 else 256,
+        # reducer capacity: the power of two covering split_kv (part of the compile key)
+        reducer_max_splits=_get_reducer_max_splits(split_kv) if is_fp8 else 256,
         pack_q=pack_q,
     )
 
