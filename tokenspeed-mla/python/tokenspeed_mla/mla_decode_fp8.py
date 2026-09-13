@@ -1820,6 +1820,8 @@ class BlackwellMultiHeadLatentAttentionForwardFP8:
             lse_scale_ptr, cute.make_layout(self.reducer_max_splits)
         )
 
+        # let the next split kernel get scheduled early; its own wait still orders the data
+        cute.arch.griddepcontrol_launch_dependents()
         cute.arch.griddepcontrol_wait()
 
         gLSE = mAccLSE[acc_row, None, acc_tile, blk_coord[2]]
@@ -1896,7 +1898,6 @@ class BlackwellMultiHeadLatentAttentionForwardFP8:
                 + j * self.threads_per_warp * self.num_compute_warps
             )
             mO[blk_coord[0], element_idx, blk_coord[1], blk_coord[2]] = rO[j]
-        cute.arch.griddepcontrol_launch_dependents()
         return
 
     @staticmethod
