@@ -59,7 +59,7 @@ def _get_reducer_d_tiles(
     num_sms: int,
     split_kv: int,
 ) -> int:
-    """Return 1/2/4 D512 bands for the real output rows and split count.
+    """Return 1 or 2 D512 bands for the real output rows and split count.
 
     Adapted from FlashInfer PR #4178: minimize waves per output band, keeping
     the smaller grid on ties. Full row grids avoid duplicating LSE reduction.
@@ -67,14 +67,9 @@ def _get_reducer_d_tiles(
     rows = batch_size * seq_len_q * num_heads
     if rows <= 0 or num_sms <= 0 or rows >= num_sms or split_kv <= 1:
         return 1
-    best = 1
-    best_waves = ceil_div(rows, num_sms)
-    for bands in (2, 4):
-        if bands <= split_kv:
-            waves = ceil_div(rows * bands, num_sms)
-            if waves * best < best_waves * bands:
-                best, best_waves = bands, waves
-    return best
+    # no 4 bands: that leaves one fp16 element per reducer thread, and its
+    # 16-bit partial loads cost more than the band saves
+    return 2 if ceil_div(rows * 2, num_sms) < 2 * ceil_div(rows, num_sms) else 1
 
 
 def _get_reducer_max_splits(split_kv: int) -> int:
