@@ -676,7 +676,8 @@ def tokenspeed_mla_decode(
 
     is_var_split_kv = False
     block_split_kvs = None
-    skip_correction_threshold = 0.0
+    # FP8: keep the row max while it grows by <= 8 log2 units (P <= 256 < 448).
+    skip_correction_threshold = 8.0 if is_fp8 else 0.0
 
     # For fixed-length input, set is_persistent to True; otherwise, set to False.
     is_persistent = not is_var_seq
