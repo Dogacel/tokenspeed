@@ -147,9 +147,9 @@ def _check_output(actual, expected, dtype):
 @pytest.mark.parametrize(
     "batch,q_len,heads,splits,expected",
     [
-        (1, 1, 6, 32, 4),
+        (1, 1, 6, 32, 2),
         (1, 1, 48, 32, 2),
-        (1, 1, 96, 32, 4),
+        (1, 1, 96, 32, 1),
         (1, 8, 96, 8, 1),
         (4, 1, 48, 32, 1),
         (1, 1, 6, 2, 2),
