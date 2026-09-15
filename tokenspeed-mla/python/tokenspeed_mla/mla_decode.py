@@ -27,6 +27,7 @@ and exposes them via a PyTorch API compatible with FlashInfer's MLA backend.
 """
 
 import functools
+import os
 from typing import Callable, Optional, Tuple
 
 import cutlass
@@ -51,6 +52,9 @@ from tokenspeed_mla.utils import (
     torch_to_cutlass_dtype,
 )
 
+# FP8 split-KV partials as fp16 instead of fp32: faster reductions, opt in with =1
+_FP16_PARTIALS = os.environ.get("TOKENSPEED_MLA_FP16_PARTIALS", "0") == "1"
+
 
 def _get_reducer_d_tiles(
     batch_size: int,
@@ -67,8 +71,8 @@ def _get_reducer_d_tiles(
     rows = batch_size * seq_len_q * num_heads
     if rows <= 0 or num_sms <= 0 or rows >= num_sms or split_kv <= 1:
         return 1
-    # no 4 bands: that leaves one fp16 element per reducer thread, and its
-    # 16-bit partial loads cost more than the band saves
+    # no 4 bands: that leaves one partial element per reducer thread, and those
+    # single-element loads cost more than the band saves
     return 2 if ceil_div(rows * 2, num_sms) < 2 * ceil_div(rows, num_sms) else 1
 
 
@@ -199,6 +203,7 @@ def _get_compiled_mla_kernel(
     reducer_d_tiles: int = 1,
     reducer_max_splits: int = 256,
     pack_q: bool = False,
+    partial_fp16: bool = False,
 ) -> Callable:
     """Compile and cache an MLA decode kernel.
 
@@ -251,6 +256,7 @@ def _get_compiled_mla_kernel(
         kernel_kwargs["cp_world"] = cp_world
         kernel_kwargs["reducer_d_tiles"] = reducer_d_tiles
         kernel_kwargs["reducer_max_splits"] = reducer_max_splits
+        kernel_kwargs["partial_fp16"] = partial_fp16
     kernel_obj = KernelClass(**kernel_kwargs)
 
     # All dimensions as sym_int — this matches the original kernel's use of
@@ -726,6 +732,7 @@ def tokenspeed_mla_decode(
         # reducer capacity: the power of two covering split_kv (part of the compile key)
         reducer_max_splits=_get_reducer_max_splits(split_kv) if is_fp8 else 256,
         pack_q=pack_q,
+        partial_fp16=_FP16_PARTIALS,
     )
 
     # DCP: allocate real LSE tensor when return_lse=True (DCP path). torch.zeros

@@ -226,6 +226,7 @@ class BlackwellMultiHeadLatentAttentionForwardFP8:
         reducer_d_tiles: int = 1,
         reducer_max_splits: Optional[int] = None,
         pack_q: bool = False,
+        partial_fp16: bool = False,
     ):
         """Initializes the configuration for a Blackwell Multi-Head Latent Attention (MLA) kernel.
 
@@ -263,6 +264,8 @@ class BlackwellMultiHeadLatentAttentionForwardFP8:
             caller must size split-KV workspace for (128, ceil(H*Sq/128)).
             False preserves the folded layout for existing direct callers.
         :type pack_q: bool
+        :param partial_fp16: Store split-KV partials as fp16 instead of acc_dtype
+        :type partial_fp16: bool
         """
 
         self.latent_dim = 512
@@ -287,7 +290,7 @@ class BlackwellMultiHeadLatentAttentionForwardFP8:
         self.acc_dtype = acc_dtype
         self.lse_dtype = lse_dtype
         # split-KV partials are normalized (|v| <= 448), so fp16 is enough
-        self.partial_dtype = cutlass.Float16
+        self.partial_dtype = cutlass.Float16 if partial_fp16 else acc_dtype
         self.mma_qk_tiler_mn = mma_qk_tiler_mn
         self.mma_pv_tiler_mn = mma_pv_tiler_mn
         self.max_active_clusters = max_active_clusters
@@ -4605,7 +4608,7 @@ class BlackwellMultiHeadLatentAttentionForwardFP8:
                 (H, split_kv, S, B),
                 stride=(split_kv, 1, H * split_kv, H * split_kv * S),
             )
-            # the fp16 block is a multiple of 1 KB; say so or LSE loads drop to 16-bit halves
+            # the partial block is a multiple of 1 KB; say so or LSE loads drop to 16-bit halves
             acc_lse_iter = cute.recast_ptr(
                 workspace.iterator
                 + cute.assume(
@@ -4741,6 +4744,7 @@ def run(
     iterations: int,
     skip_ref_check: bool,
     use_cold_l2: bool,
+    partial_fp16: bool,
     is_causal: bool = False,
     **kwargs,
 ):
@@ -5143,6 +5147,7 @@ def run(
         num_heads=num_heads,
         seq_len_q=seq_len_q,
         reducer_max_splits=split_kv,
+        partial_fp16=partial_fp16,
     )
 
     # Get current CUDA stream from PyTorch
@@ -5650,6 +5655,12 @@ if __name__ == "__main__":
         help="Apply spec-decoding causal mask: Q token qi sees KV [0, K - S_q + 1 + qi)",
     )
 
+    parser.add_argument(
+        "--partial_fp16",
+        action="store_true",
+        help="Store split-KV partials as fp16",
+    )
+
     args = parser.parse_args()
 
     exec_time = run(
@@ -5678,6 +5689,7 @@ if __name__ == "__main__":
         args.iterations,
         args.skip_ref_check,
         args.use_cold_l2,
+        args.partial_fp16,
         is_causal=args.is_causal,
     )
     print(f"Execution time (mla + reduction): {exec_time:.4f} microseconds")
