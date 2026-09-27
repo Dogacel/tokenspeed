@@ -208,7 +208,8 @@ def _get_compiled_mla_kernel(
     reducer_d_tiles: int = 1,
     reducer_max_splits: int = 256,
     pack_q: bool = False,
-    partial_fp16: bool = False,
+    *,
+    partial_fp16: bool,
 ) -> Callable:
     """Compile and cache an MLA decode kernel.
 

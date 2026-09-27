@@ -226,11 +226,11 @@ class BlackwellMultiHeadLatentAttentionForwardFP8:
         cp_rank: int = 0,
         cp_interleave_size: int = 1,
         reducer_d_tiles: int = 1,
-        reducer_max_splits: Optional[int] = None,
         pack_q: bool = False,
-        partial_fp16: bool = False,
         *,
         compute_capability: tuple[int, int],
+        reducer_max_splits: int,
+        partial_fp16: bool,
     ):
         """Initializes the shared SM100/SM103/SM107 MLA kernel configuration.
 
@@ -279,9 +279,6 @@ class BlackwellMultiHeadLatentAttentionForwardFP8:
         self.latent_dim = 512
         if reducer_d_tiles not in (1, 2, 4):
             raise ValueError("reducer_d_tiles must be 1, 2 or 4")
-        if reducer_max_splits is None:
-            # largest split count public auto-splitting produces for this path
-            reducer_max_splits = 64 if mma_qk_tiler_mn[0] == 64 else 32
         if not 1 <= reducer_max_splits <= MAX_SPLITS:
             raise ValueError(f"reducer_max_splits must be in [1, {MAX_SPLITS}]")
         self.reducer_d_tiles = reducer_d_tiles
@@ -1105,7 +1102,8 @@ class BlackwellMultiHeadLatentAttentionForwardFP8:
                     o_reduction.shape[3],
                 ),
                 block=[self.threads_per_warp * self.num_compute_warps, 1, 1],
-                smem=max(self.reducer_max_splits, self.threads_per_warp)
+                smem=ceil_div(self.reducer_max_splits, self.threads_per_warp)
+                * self.threads_per_warp
                 * self.acc_dtype.width
                 // 8,
                 stream=stream,
@@ -1815,6 +1813,8 @@ class BlackwellMultiHeadLatentAttentionForwardFP8:
         :type cache_seqs: cute.Tensor
         :param block_split_kvs: Per-block split_kv values tensor (for variable split_kv)
         :type block_split_kvs: cute.Tensor
+        :param output_scale: Scale applied after combining normalized partial outputs
+        :type output_scale: cutlass.Float32
         """
         bidx, bidy, bidz = cute.arch.block_idx()
         tidx, _, _ = cute.arch.thread_idx()
@@ -1850,7 +1850,10 @@ class BlackwellMultiHeadLatentAttentionForwardFP8:
         # Alloc shared memory
         smem = utils.SmemAllocator()
         # LSE phase: one weight per lane of warp 0
-        reducer_scale_count = max(self.reducer_max_splits, self.threads_per_warp)
+        reducer_scale_count = (
+            ceil_div(self.reducer_max_splits, self.threads_per_warp)
+            * self.threads_per_warp
+        )
         storage = smem.allocate(reducer_scale_count * self.acc_dtype.width // 8, 16)
         lse_scale_ptr = cute.recast_ptr(storage, dtype=self.acc_dtype)
         smem_lse_scale = cute.make_tensor(
@@ -2693,8 +2696,9 @@ class BlackwellMultiHeadLatentAttentionForwardFP8:
             )
             qk_tile_count = k_tile_count - 1
             pv_tile_count = k_tile_count
-            # 2-CTA: issue QK two tiles ahead of PV so it does not wait behind PV
-            if cutlass.const_expr(self.use_2cta_instrs):
+            # Warm up the same schedule with a shape-dependent QK lead.
+            qk_lead = 2 if self.use_2cta_instrs else 1
+            for _ in cutlass.range_constexpr(qk_lead - 1):
                 if qk_tile_count > 0:
                     (
                         tiled_mma_qk,

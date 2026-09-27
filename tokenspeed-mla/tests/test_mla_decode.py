@@ -375,6 +375,7 @@ class TestCompile:
                     is_var_seq=True,
                     is_var_split_kv=False,
                     compute_capability={capability!r},
+                    partial_fp16=False,
                     fold_sq_factor={4 if heads == 16 else 1},
                     causal_mask=causal_mask,
                     num_heads={heads},
@@ -741,7 +742,8 @@ def _check_reducer_variants(partial_fp16):
     for case, capacity in [(_Case(1, 8192, 12, 4), 64), (_Case(1, 8192, 96, 1), 32)]:
         q, kv, tables, lengths = _make_inputs(case, "fp8", False, "cuda")
         q.zero_()  # Uniform attention has a closed-form base-2 LSE.
-        expected_out = _reference_mla(q, kv, tables, lengths, [0])
+        output_scale = 0.375
+        expected_out = _reference_mla(q, kv, tables, lengths, [0]) * output_scale
         visible = (
             case.kv_len - case.q_len + torch.arange(1, case.q_len + 1, device="cuda")
         )
@@ -753,6 +755,7 @@ def _check_reducer_variants(partial_fp16):
             for bands, max_splits in [
                 (1, 256),
                 (1, capacity),
+                (1, capacity + 1),
                 (2, capacity),
                 (4, capacity),
             ]:
@@ -773,6 +776,7 @@ def _check_reducer_variants(partial_fp16):
                     seq_lens=lengths,
                     max_seq_len=case.kv_len,
                     softmax_scale=192**-0.5,
+                    output_scale=output_scale,
                     return_lse=True,
                     is_var_seq=False,
                     enable_pdl=pdl,
